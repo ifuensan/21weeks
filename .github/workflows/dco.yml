@@ -1,0 +1,48 @@
+name: DCO
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  check-signoff:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history of the PR)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Verify Signed-off-by on every commit
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          failed=0
+          for sha in $(git rev-list --no-merges "${BASE_SHA}..HEAD"); do
+            msg="$(git log -1 --format=%B "$sha")"
+            author_email="$(git log -1 --format=%ae "$sha")"
+
+            if ! grep -q '^Signed-off-by: ' <<<"$msg"; then
+              echo "::error::Commit $sha no tiene Signed-off-by (usa git commit -s)."
+              failed=1
+              continue
+            fi
+
+            # El sign-off debe coincidir con el email del autor del commit
+            if ! grep '^Signed-off-by: ' <<<"$msg" | grep -qF "<${author_email}>"; then
+              echo "::error::Commit $sha: ningún Signed-off-by coincide con el autor <${author_email}>."
+              failed=1
+            fi
+
+            # Rechazar sign-offs de identidades de IA / bots
+            if grep '^Signed-off-by: ' <<<"$msg" | grep -qiE 'noreply@anthropic\.com|copilot@github\.com|@anthropic\.com|[Bb]ot@'; then
+              echo "::error::Commit $sha: Signed-off-by de una identidad de IA/bot. El DCO solo lo certifica una persona."
+              failed=1
+            fi
+          done
+          exit "$failed"
