@@ -3,7 +3,7 @@ import { generateObject, generateText, Output, stepCountIs } from "ai";
 import { createRouter, publicQuery } from "../middleware";
 import { PROJECTS, LEARNING_RESOURCES, type Locale, type Profile } from "@contracts/types";
 import { kimiGw, defaultModelId } from "../ai/provider";
-import { classifyAiError } from "../ai/ai-client";
+import { classifyAiError, isRetryableAiError } from "../ai/ai-client";
 import { mentorSystemPrompt, profileSummary } from "../ai/mentor";
 import { knowledgeTools } from "../ai/knowledge";
 
@@ -107,6 +107,101 @@ async function resolveReferencedPRs(issueId: string, comments: string[]): Promis
   return out;
 }
 
+// Reintento corto para errores transitorios del gateway (saturación, 5xx, cortes
+// de red). Solo se reintenta AiTransient; los errores terminales (cuota agotada,
+// contenido rechazado, mala configuración) se propagan tal cual.
+async function withAiRetry<T>(fn: () => Promise<T>, attempts = 2, delayMs = 4000): Promise<T> {
+  let lastErr: unknown;
+  for (let i = 0; i <= attempts; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      const mapped = classifyAiError(err);
+      if (!isRetryableAiError(mapped) || i === attempts) throw mapped;
+      console.warn(`[ai] error transitorio (${mapped.message?.slice(0, 120)}), reintento ${i + 1}/${attempts}`);
+      await new Promise((r) => setTimeout(r, delayMs * (i + 1)));
+    }
+  }
+  throw lastErr;
+}
+
+// Fase de investigación: busca fuentes primarias y devuelve el pool completo
+// de recursos verificados (canónicos + investigados + cursos curados).
+async function researchResources(
+  project: (typeof PROJECTS)[number],
+  profile: Profile,
+  issue: { title: string } | null | undefined,
+): Promise<{ label: string; url: string }[]> {
+  const canonicalLinks = [project.urls.repo, project.urls.contributing, project.urls.docs].filter(
+    Boolean,
+  ) as string[];
+
+  let researched: { label: string; url: string }[] = [];
+  try {
+    const research = await withAiRetry(async () =>
+      generateText({
+        model: kimiGw()(await defaultModelId()),
+        tools: knowledgeTools,
+        stopWhen: stepCountIs(5),
+        prompt: `You are researching resources for a 21-week contributor onboarding plan for the open-source project ${project.name} (${project.urls.repo}).
+
+Do 2-4 searches with searchBitcoinKnowledge / lookupSpec to find concrete, primary sources a new contributor should read: contributing guides, architecture docs, canonical PRs and precedents, relevant BIPs/BOLTs sections, mailing-list or Delving Bitcoin threads about this project's area.${issue ? ` The user's first issue is: ${issue.title} — find sources specifically about that topic.` : ""}
+
+Then output ONLY a JSON array (no markdown fences) of up to 14 items:
+[{"label": "short human title", "url": "exact URL from a tool result"}, ...]
+Every URL must come verbatim from a tool result. No invented URLs.`,
+        providerOptions: { "kimi-gw": { max_completion_tokens: 3000 } },
+      }),
+    );
+    // 1) cosecha determinista: URLs directamente de los tool results
+    //    (inmune a que el modelo se quede sin tokens para el JSON)
+    const seen = new Set<string>();
+    for (const step of (research as { steps?: unknown[] }).steps ?? []) {
+      const toolResults = (step as { toolResults?: unknown[] }).toolResults ?? [];
+      for (const tr of toolResults) {
+        const out = (tr as { result?: unknown; output?: unknown }).result ??
+          (tr as { output?: unknown }).output;
+        const hits = (out as { results?: { title?: string; url?: string }[] })?.results;
+        if (!Array.isArray(hits)) continue;
+        for (const h of hits) {
+          const url = h?.url ?? "";
+          if (!/^https?:\/\//.test(url) || seen.has(url)) continue;
+          seen.add(url);
+          researched.push({ label: (h.title ?? url).slice(0, 90), url });
+        }
+      }
+    }
+    // 2) fallback: parsear el JSON del modelo
+    if (researched.length === 0) {
+      const match = research.text.match(/\[[\s\S]*\]/);
+      if (match) {
+        const parsed = JSON.parse(match[0]) as { label: string; url: string }[];
+        researched = parsed.filter(
+          (r) => typeof r?.label === "string" && /^https?:\/\//.test(r?.url ?? ""),
+        );
+      }
+    }
+    researched = researched.slice(0, 14);
+  } catch (e) {
+    // si la investigación falla, seguimos solo con los enlaces canónicos
+    console.warn("[plan] research phase failed:", (e as Error)?.message ?? e);
+  }
+  console.log(`[plan] researched resources: ${researched.length}`);
+
+  // Cursos curados (Librería de Satoshi / Bitcoin Dev Project) que
+  // solapan con las tracks del proyecto y el nivel del usuario.
+  const curated = LEARNING_RESOURCES.filter(
+    (r) => r.tracks.some((t) => project.tracks.includes(t)) && r.levels.includes(profile.level),
+  );
+
+  return [
+    ...canonicalLinks.map((u) => ({ label: u.replace(/^https?:\/\//, "").slice(0, 60), url: u })),
+    ...researched,
+    ...curated.map((c) => ({ label: `[course] ${c.title.en}`, url: c.url })),
+  ];
+}
+
 export const mentorRouter = createRouter({
   recommendIssues: publicQuery
     .input(
@@ -150,7 +245,8 @@ export const mentorRouter = createRouter({
         .join("\n---\n");
 
       try {
-        const { object } = await generateObject({
+        const { object } = await withAiRetry(async () =>
+          generateObject({
           model: kimiGw()(await defaultModelId()),
           schema: z.object({
             rankings: z.array(
@@ -176,11 +272,28 @@ ${profileSummary(input.profile as Profile, locale)}
 Issues:
 ${issuesDigest}`,
           providerOptions: { "kimi-gw": { max_completion_tokens: 2500 } },
-        });
+          }),
+        );
         return { rankings: object.rankings };
       } catch (err) {
         throw classifyAiError(err);
       }
+    }),
+
+  researchPlanResources: publicQuery
+    .input(
+      z.object({
+        locale: z.enum(["es", "en"]),
+        profile: profileSchema,
+        projectId: z.string(),
+        issue: issueSchema.nullish(),
+      }),
+    )
+    .mutation(async ({ input }) => {
+      const project = PROJECTS.find((p) => p.id === input.projectId);
+      if (!project) throw new Error("unknown project");
+      const pool = await researchResources(project, input.profile as Profile, input.issue);
+      return { pool };
     }),
 
   generatePlan: publicQuery
@@ -190,6 +303,7 @@ ${issuesDigest}`,
         profile: profileSchema,
         projectId: z.string(),
         issue: issueSchema.nullish(),
+        pool: z.array(z.object({ label: z.string(), url: z.string() })).nullish(),
       }),
     )
     .mutation(async ({ input }) => {
@@ -203,76 +317,12 @@ ${issuesDigest}`,
         : "";
 
       try {
-        // ---- Fase 1: investigar fuentes reales en bitcoinknowledge.dev ----
-        const canonicalLinks = [
-          project.urls.repo,
-          project.urls.contributing,
-          project.urls.docs,
-        ].filter(Boolean) as string[];
-
-        let researched: { label: string; url: string }[] = [];
-        try {
-          const research = await generateText({
-            model: kimiGw()(await defaultModelId()),
-            tools: knowledgeTools,
-            stopWhen: stepCountIs(5),
-            prompt: `You are researching resources for a 21-week contributor onboarding plan for the open-source project ${project.name} (${project.urls.repo}).
-
-Do 2-4 searches with searchBitcoinKnowledge / lookupSpec to find concrete, primary sources a new contributor should read: contributing guides, architecture docs, canonical PRs and precedents, relevant BIPs/BOLTs sections, mailing-list or Delving Bitcoin threads about this project's area.${input.issue ? ` The user's first issue is: ${input.issue.title} — find sources specifically about that topic.` : ""}
-
-Then output ONLY a JSON array (no markdown fences) of up to 14 items:
-[{"label": "short human title", "url": "exact URL from a tool result"}, ...]
-Every URL must come verbatim from a tool result. No invented URLs.`,
-            providerOptions: { "kimi-gw": { max_completion_tokens: 3000 } },
-          });
-          // 1) cosecha determinista: URLs directamente de los tool results
-          //    (inmune a que el modelo se quede sin tokens para el JSON)
-          const seen = new Set<string>();
-          for (const step of (research as { steps?: unknown[] }).steps ?? []) {
-            const toolResults = (step as { toolResults?: unknown[] }).toolResults ?? [];
-            for (const tr of toolResults) {
-              const out = (tr as { result?: unknown; output?: unknown }).result ??
-                (tr as { output?: unknown }).output;
-              const hits = (out as { results?: { title?: string; url?: string }[] })?.results;
-              if (!Array.isArray(hits)) continue;
-              for (const h of hits) {
-                const url = h?.url ?? "";
-                if (!/^https?:\/\//.test(url) || seen.has(url)) continue;
-                seen.add(url);
-                researched.push({ label: (h.title ?? url).slice(0, 90), url });
-              }
-            }
-          }
-          // 2) fallback: parsear el JSON del modelo
-          if (researched.length === 0) {
-            const match = research.text.match(/\[[\s\S]*\]/);
-            if (match) {
-              const parsed = JSON.parse(match[0]) as { label: string; url: string }[];
-              researched = parsed.filter(
-                (r) => typeof r?.label === "string" && /^https?:\/\//.test(r?.url ?? ""),
-              );
-            }
-          }
-          researched = researched.slice(0, 14);
-        } catch (e) {
-          // si la investigación falla, seguimos solo con los enlaces canónicos
-          console.warn("[plan] research phase failed:", (e as Error)?.message ?? e);
-        }
-        console.log(`[plan] researched resources: ${researched.length}`);
-
-        // Cursos curados (Librería de Satoshi / Bitcoin Dev Project) que
-        // solapan con las tracks del proyecto y el nivel del usuario.
-        const curated = LEARNING_RESOURCES.filter(
-          (r) =>
-            r.tracks.some((t) => project.tracks.includes(t)) &&
-            r.levels.includes(input.profile.level),
-        );
-
-        const resourcePool = [
-          ...canonicalLinks.map((u) => ({ label: u.replace(/^https?:\/\//, "").slice(0, 60), url: u })),
-          ...researched,
-          ...curated.map((c) => ({ label: `[course] ${c.title.en}`, url: c.url })),
-        ];
+        // El pool llega del cliente (fase 1 ya hecha en researchPlanResources);
+        // si no llega (llamada directa), investigamos aquí como fallback.
+        const resourcePool =
+          input.pool && input.pool.length > 0
+            ? input.pool
+            : await researchResources(project, input.profile as Profile, input.issue);
         const poolBlock = resourcePool.map((r) => `- ${r.label} :: ${r.url}`).join("\n");
 
         // ---- Fase 2: generar el plan usando solo URLs verificadas ----
@@ -296,7 +346,8 @@ Every URL must come verbatim from a tool result. No invented URLs.`,
             .length(21),
         });
 
-        const result = await generateText({
+        const result = await withAiRetry(async () =>
+          generateText({
           model: kimiGw()(await defaultModelId()),
           output: Output.object({ schema: planSchema }),
           prompt: `${mentorSystemPrompt(locale, input.profile as Profile, project)}
@@ -324,7 +375,8 @@ User profile:
 ${profileSummary(input.profile as Profile, locale)}
 ${issueBlock}`,
           providerOptions: { "kimi-gw": { max_completion_tokens: 11000 } },
-        });
+          }),
+        );
 
         const object = await result.output;
         return {
