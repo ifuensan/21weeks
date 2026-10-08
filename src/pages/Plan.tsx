@@ -85,38 +85,55 @@ export default function PlanPage() {
     },
   });
 
+  // Fase 1 (rápida, ~20s): investigar recursos. Fase 2 (~60-70s): generar
+  // el plan con ese pool. Dos peticiones cortas aguantan mejor los límites
+  // de tiempo de la plataforma que una sola petición de ~90s.
+  const researchMutation = trpc.mentor.researchPlanResources.useMutation({
+    onSuccess: (data) => {
+      genMutation.mutate({ ...genInput(), pool: data.pool });
+    },
+    onError: () => {
+      // si la investigación falla, el servidor puede seguir con canónicos:
+      // intentamos generar sin pool (fallback inline en generatePlan)
+      genMutation.mutate({ ...genInput(), pool: null });
+    },
+  });
+
+  const genInput = () => ({
+    locale,
+    profile: profile!,
+    projectId: project!.id,
+    issue: pickedIssue
+      ? {
+          id: pickedIssue.id,
+          number: pickedIssue.number,
+          title: pickedIssue.title,
+          url: pickedIssue.url,
+          labels: pickedIssue.labels,
+          comments: pickedIssue.comments,
+          body: pickedIssue.body,
+        }
+      : null,
+  });
+
   const generate = () => {
     if (!profile || !project) return;
-    // red de seguridad: si en ~3 min no hay respuesta (proxy/saturation),
+    // red de seguridad: si en ~4 min no hay respuesta (proxy/saturation),
     // mostramos error con reintento en vez de un spinner eterno
     if (genTimer.current) clearTimeout(genTimer.current);
     genTimer.current = setTimeout(() => {
-      if (genMutation.isPending) {
+      if (researchMutation.isPending || genMutation.isPending) {
+        researchMutation.reset();
         genMutation.reset();
         setAiError(true);
       }
-    }, 190_000);
-    genMutation.mutate({
-      locale,
-      profile,
-      projectId: project.id,
-      issue: pickedIssue
-        ? {
-            id: pickedIssue.id,
-            number: pickedIssue.number,
-            title: pickedIssue.title,
-            url: pickedIssue.url,
-            labels: pickedIssue.labels,
-            comments: pickedIssue.comments,
-            body: pickedIssue.body,
-          }
-        : null,
-    });
+    }, 260_000);
+    researchMutation.mutate(genInput());
   };
 
   // autogenerar al llegar desde Issues con proyecto elegido y sin plan
   useEffect(() => {
-    if (!plan && profile && project && !genMutation.isPending && !genMutation.isSuccess && !aiError) {
+    if (!plan && profile && project && !researchMutation.isPending && !genMutation.isPending && !genMutation.isSuccess && !aiError) {
       generate();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -145,7 +162,7 @@ export default function PlanPage() {
     );
   }
 
-  if (genMutation.isPending || (!plan && !aiError)) {
+  if (researchMutation.isPending || genMutation.isPending || (!plan && !aiError)) {
     return (
       <div className="mx-auto max-w-3xl px-5 py-32 text-center">
         <div className="font-mono2 text-sm chat-caret opacity-80">{t("plan.generating")}</div>
@@ -205,7 +222,7 @@ export default function PlanPage() {
         </div>
 
         <div className="mt-8 flex flex-wrap items-center gap-4">
-          <button className="btn-ghost-ember" onClick={generate} disabled={genMutation.isPending}>
+          <button className="btn-ghost-ember" onClick={generate} disabled={researchMutation.isPending || genMutation.isPending}>
             ↻ {t("plan.regenerate")}
           </button>
           <button className="btn-ember" onClick={exportPlan}>
