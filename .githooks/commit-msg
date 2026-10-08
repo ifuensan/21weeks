@@ -1,0 +1,24 @@
+#!/bin/sh
+# commit-msg hook: exige Signed-off-by humano y rechaza sign-offs de IA/bots.
+# Activar con: git config core.hooksPath .githooks
+
+MSG_FILE="$1"
+
+# Identidades de IA/bots que no pueden firmar el DCO
+BOT_PATTERN='noreply@anthropic\.com|copilot@github\.com|noreply@github\.com|cursor|devin|[Bb]ot@|@anthropic\.com'
+
+signoffs=$(grep -c '^Signed-off-by: ' "$MSG_FILE" || true)
+
+if [ "$signoffs" -eq 0 ]; then
+  echo "✗ Commit rechazado: falta 'Signed-off-by' (usa git commit -s)." >&2
+  echo "  Ver CONTRIBUTING.md — este repo exige DCO." >&2
+  exit 1
+fi
+
+if grep '^Signed-off-by: ' "$MSG_FILE" | grep -qiE "$BOT_PATTERN"; then
+  echo "✗ Commit rechazado: el Signed-off-by es de una identidad de IA/bot." >&2
+  echo "  El DCO solo lo puede certificar una persona. Ver CONTRIBUTING.md." >&2
+  exit 1
+fi
+
+exit 0
