@@ -1,6 +1,6 @@
 # 21 Weeks
 
-**Del interés a la primera contribución open source en Bitcoin — en 21 semanas.**
+**Del interés a la primera contribución open source en Bitcoin, en 21 semanas.**
 
 21 Weeks es una app web que ayuda a developers y researchers a empezar a contribuir a proyectos open source de Bitcoin y Lightning. 
 Sin shitcoins: solo Bitcoin, Lightning, Nostr y su ecosistema de software libre.
