@@ -2,7 +2,8 @@
 
 **Del interés a la primera contribución open source en Bitcoin — en 21 semanas.**
 
-21 Weeks es una app web bilingüe (ES/EN) que ayuda a developers y researchers a empezar a contribuir a proyectos open source de Bitcoin y Lightning. Sin shitcoins: solo Bitcoin, Lightning, Nostr y su ecosistema de software libre.
+21 Weeks es una app web que ayuda a developers y researchers a empezar a contribuir a proyectos open source de Bitcoin y Lightning. 
+Sin shitcoins: solo Bitcoin, Lightning, Nostr y su ecosistema de software libre.
 
 ## Qué hace
 
@@ -89,4 +90,4 @@ public/     Logos oficiales de los 15 proyectos
 
 ## Licencia y contribuciones
 
-Proyecto open source nacido de [Librería de Satoshi](https://libreriadesatoshi.com) / HackNodes Lab. Issues y PRs bienvenidos — precisamente de eso va esto. ₿
+Proyecto open source nacido de [Librería de Satoshi](https://libreriadesatoshi.com) / [HackNodes Lab](https://hacknodes.com). Issues y PRs bienvenidas, precisamente de eso va esto. ₿
