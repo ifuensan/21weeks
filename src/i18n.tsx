@@ -111,7 +111,7 @@ const dict = {
 
     "plan.eyebrow": "El camino",
     "plan.title": "Tu plan de 21 semanas",
-    "plan.generating": "El mentor investiga fuentes en bitcoinknowledge.dev y diseña tu plan… (1-3 min, vale la pena)",
+    "plan.generating": "El mentor investiga fuentes en bitcoinknowledge.dev y diseña tu plan… (2-4 min, vale la pena)",
     "plan.regenerate": "Regenerar plan",
     "plan.week": "Semana",
     "plan.objectives": "Objetivos",
@@ -257,7 +257,7 @@ const dict = {
 
     "plan.eyebrow": "The path",
     "plan.title": "Your 21-week plan",
-    "plan.generating": "The mentor is researching sources on bitcoinknowledge.dev and designing your plan… (1-3 min, worth it)",
+    "plan.generating": "The mentor is researching sources on bitcoinknowledge.dev and designing your plan… (2-4 min, worth it)",
     "plan.regenerate": "Regenerate plan",
     "plan.week": "Week",
     "plan.objectives": "Objectives",
